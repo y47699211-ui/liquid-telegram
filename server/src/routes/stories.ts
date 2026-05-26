@@ -100,13 +100,13 @@ storiesRouter.get('/feed', (req, res) => {
   const me = req.user!.uid;
   // Get all stories from people I follow and my own, grouped by author
   const rows = db
-    .prepare<[string, string, number], StoryRow>(
+    .prepare<[number, string, string], StoryRow>(
       `SELECT s.* FROM stories s
        WHERE s.expires_at > ? AND (s.author_id = ?
          OR s.author_id IN (SELECT followee_id FROM follows WHERE follower_id = ?))
        ORDER BY s.created_at ASC`,
     )
-    .all(me, me, Date.now());
+    .all(Date.now(), me, me);
 
   const byAuthor = new Map<string, SerializedStory[]>();
   for (const r of rows) {
