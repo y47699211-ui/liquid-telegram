@@ -32,6 +32,8 @@ export function sameDay(a: number, b: number): boolean {
   );
 }
 
+export const formatRelative = relativeTime;
+
 export function dayLabel(ts: number): string {
   const d = new Date(ts);
   const today = new Date();

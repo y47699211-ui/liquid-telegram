@@ -9,7 +9,13 @@ interface AuthedSocket extends Socket {
   data: { uid: string; username: string };
 }
 
+let ioRef: Server | null = null;
 const onlineUsers = new Map<string, Set<string>>(); // uid -> set of socket ids
+
+export function emitToUser(userId: string, event: string, payload: unknown): void {
+  if (!ioRef) return;
+  ioRef.to(`user:${userId}`).emit(event, payload);
+}
 
 function isMember(chatId: string, userId: string): boolean {
   return !!db
@@ -30,6 +36,7 @@ export function setupSocket(server: HttpServer): Server {
     pingInterval: 25_000,
     pingTimeout: 60_000,
   });
+  ioRef = io;
 
   io.use((socket, next) => {
     const token = (socket.handshake.auth?.token as string | undefined) ?? '';
@@ -74,7 +81,8 @@ export function setupSocket(server: HttpServer): Server {
             return;
           }
           const body = payload.body.trim();
-          if (!body || body.length > 4000) {
+          const imageUrl = (payload as { imageUrl?: string | null }).imageUrl ?? null;
+          if ((!body && !imageUrl) || body.length > 4000) {
             ack?.({ ok: false, error: 'invalid body' });
             return;
           }
@@ -85,17 +93,41 @@ export function setupSocket(server: HttpServer): Server {
           const id = nanoid(14);
           const now = Date.now();
           db.prepare(
-            `INSERT INTO messages (id, chat_id, author_id, body, reply_to, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-          ).run(id, payload.chatId, uid, body, payload.replyTo ?? null, now);
+            `INSERT INTO messages (id, chat_id, author_id, body, image_url, reply_to, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          ).run(id, payload.chatId, uid, body, imageUrl, payload.replyTo ?? null, now);
           db.prepare('UPDATE chats SET last_message_at = ? WHERE id = ?').run(now, payload.chatId);
+
+          // Detect @mentions and create notifications for chat members
+          const mentions = Array.from(new Set(body.match(/@([a-z0-9_]{2,24})/gi) ?? []))
+            .map((m) => m.slice(1).toLowerCase());
+          if (mentions.length > 0) {
+            const memberRows = db
+              .prepare<[string, string], UserRow>(
+                `SELECT u.* FROM users u JOIN chat_members cm ON cm.user_id = u.id
+                 WHERE cm.chat_id = ? AND u.id != ?`,
+              )
+              .all(payload.chatId, uid);
+            for (const m of memberRows) {
+              if (mentions.includes(m.username.toLowerCase())) {
+                const notifId = nanoid(14);
+                db.prepare(
+                  `INSERT INTO notifications (id, user_id, type, actor_id, target_id, target_type, body, created_at)
+                   VALUES (?, ?, 'mention', ?, ?, 'message', ?, ?)`,
+                ).run(notifId, m.id, uid, id, body.slice(0, 80), now);
+                io.to(`user:${m.id}`).emit('notification:new', { id: notifId });
+              }
+            }
+          }
 
           const message = {
             id,
             chatId: payload.chatId,
             authorId: uid,
             body,
+            imageUrl,
             replyTo: payload.replyTo ?? null,
+            pinned: false,
             editedAt: null,
             deletedAt: null,
             createdAt: now,
@@ -194,6 +226,20 @@ export function setupSocket(server: HttpServer): Server {
         'UPDATE chat_members SET last_read_at = ? WHERE chat_id = ? AND user_id = ?',
       ).run(Date.now(), chatId, uid);
       io.to(`chat:${chatId}`).emit('chat:read', { chatId, userId: uid, at: Date.now() });
+    });
+
+    socket.on('message:pin', (payload: { id: string; pinned: boolean }) => {
+      const row = db
+        .prepare<[string], MessageRow>('SELECT * FROM messages WHERE id = ?')
+        .get(payload.id);
+      if (!row || !isMember(row.chat_id, uid) || row.deleted_at) return;
+      const pinned = payload.pinned ? 1 : 0;
+      db.prepare('UPDATE messages SET pinned = ? WHERE id = ?').run(pinned, payload.id);
+      io.to(`chat:${row.chat_id}`).emit('message:pinned', {
+        id: row.id,
+        chatId: row.chat_id,
+        pinned: !!pinned,
+      });
     });
 
     socket.on('disconnect', () => {

@@ -4,9 +4,9 @@ import clsx from 'clsx';
 import { useStore } from '../store';
 import { api } from '../api';
 import { getSocket } from '../socket';
-import Avatar from './Avatar';
+import Avatar, { UserAvatar } from './Avatar';
 import { dayLabel, sameDay, timeOfDay } from '../utils';
-import type { Message } from '../types';
+import type { ChatMember, Message } from '../types';
 
 const REACTION_EMOJIS = ['❤️', '😂', '🔥', '👍', '😮', '😢'];
 
@@ -25,8 +25,12 @@ export default function Conversation() {
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [attachUrl, setAttachUrl] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   // Load messages on chat change
   useEffect(() => {
@@ -82,7 +86,7 @@ export default function Conversation() {
   const send = () => {
     if (!activeChatId || !me) return;
     const body = draft.trim();
-    if (!body) return;
+    if (!body && !attachUrl) return;
 
     if (editingId) {
       getSocket()?.emit('message:edit', { id: editingId, body });
@@ -97,7 +101,9 @@ export default function Conversation() {
       chatId: activeChatId,
       authorId: me.id,
       body,
+      imageUrl: attachUrl,
       replyTo: replyTo?.id ?? null,
+      pinned: false,
       editedAt: null,
       deletedAt: null,
       createdAt: Date.now(),
@@ -107,11 +113,19 @@ export default function Conversation() {
     appendMessage(activeChatId, tempMessage);
     setDraft('');
     setReplyTo(null);
+    setAttachUrl(null);
+    setMentionQuery(null);
     emitTyping(false);
 
     getSocket()?.emit(
       'message:send',
-      { chatId: activeChatId, body, replyTo: tempMessage.replyTo, tempId },
+      {
+        chatId: activeChatId,
+        body,
+        imageUrl: tempMessage.imageUrl,
+        replyTo: tempMessage.replyTo,
+        tempId,
+      },
       (resp: { ok: boolean; message?: Message; tempId?: string; error?: string }) => {
         if (resp?.ok && resp.message && resp.tempId) {
           replaceMessage(activeChatId, resp.tempId, { ...resp.message, pending: false });
@@ -120,6 +134,16 @@ export default function Conversation() {
         }
       },
     );
+  };
+
+  const handleFile = async (file: File) => {
+    setUploading(true);
+    try {
+      const { url } = await api.uploadImage(file);
+      setAttachUrl(url);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const groupedMessages = useMemo(() => groupMessages(messages), [messages]);
@@ -151,7 +175,9 @@ export default function Conversation() {
       ? otherMember
         ? isOnline
           ? 'online'
-          : 'last seen ' + new Date(otherMember.lastSeen).toLocaleString()
+          : otherMember.lastSeen
+            ? 'last seen ' + new Date(otherMember.lastSeen).toLocaleString()
+            : ''
         : ''
       : `${chat.members.length} member${chat.members.length === 1 ? '' : 's'}`;
 
@@ -161,12 +187,20 @@ export default function Conversation() {
     <div className="glass relative flex flex-1 flex-col rounded-[28px] m-3 ml-1 overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 border-b border-white/10 px-5 py-3.5">
-        <Avatar
-          name={chat.title}
-          color={chat.avatarColor}
-          size={42}
-          online={chat.type === 'direct' ? !!isOnline : undefined}
-        />
+        {chat.type === 'direct' && otherMember ? (
+          <UserAvatar
+            user={otherMember}
+            size={42}
+            online={!!isOnline}
+            onClick={() => useStore.getState().showProfileView(otherMember.id)}
+          />
+        ) : (
+          <Avatar
+            name={chat.title}
+            color={chat.avatarColor}
+            size={42}
+          />
+        )}
         <div className="min-w-0 flex-1">
           <div className="truncate font-semibold">{chat.title}</div>
           <div className="text-xs text-white/55">
@@ -185,6 +219,18 @@ export default function Conversation() {
           </div>
         </div>
       </div>
+
+      {chat.pinnedMessage && (
+        <div className="flex items-center gap-3 border-b border-white/5 bg-white/[0.04] px-5 py-2">
+          <div className="h-7 w-1 rounded-full bg-accent" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-accent-light">
+              Pinned · {chat.pinnedMessage.authorName}
+            </div>
+            <div className="truncate text-xs text-white/75">{chat.pinnedMessage.body}</div>
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div ref={scrollRef} className="scroll-thin flex-1 overflow-y-auto px-4 py-4">
@@ -225,6 +271,9 @@ export default function Conversation() {
                   }}
                   onReact={(emoji) => {
                     getSocket()?.emit('reaction:toggle', { messageId: m.id, emoji });
+                  }}
+                  onPin={() => {
+                    getSocket()?.emit('message:pin', { id: m.id, pinned: !m.pinned });
                   }}
                   allMessages={messages}
                 />
@@ -272,17 +321,79 @@ export default function Conversation() {
           )}
         </AnimatePresence>
 
+        {attachUrl && (
+          <div className="mb-2 relative inline-block">
+            <img src={attachUrl} alt="" className="max-h-40 rounded-2xl" />
+            <button
+              onClick={() => setAttachUrl(null)}
+              className="absolute -top-2 -right-2 glass rounded-full h-6 w-6 text-xs"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {mentionQuery !== null && (
+          <MentionDropdown
+            members={chat.members.filter((m) => m.id !== me?.id)}
+            query={mentionQuery}
+            onPick={(member) => {
+              const ta = composerRef.current;
+              if (!ta) return;
+              const before = draft.slice(0, ta.selectionStart ?? draft.length);
+              const after = draft.slice(ta.selectionStart ?? draft.length);
+              const replaced = before.replace(/@[a-z0-9_]*$/i, `@${member.username} `);
+              setDraft(replaced + after);
+              setMentionQuery(null);
+              setTimeout(() => ta.focus(), 0);
+            }}
+          />
+        )}
+
         <div className="glass-soft flex items-end gap-2 rounded-3xl px-3 py-2">
+          <button
+            type="button"
+            onClick={() => fileInput.current?.click()}
+            disabled={uploading || !!editingId}
+            className="h-10 w-10 flex items-center justify-center text-white/55 hover:text-white disabled:opacity-40"
+            aria-label="Attach image"
+          >
+            {uploading ? (
+              <span className="text-[10px]">…</span>
+            ) : (
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <path d="M21 15l-5-5L5 21" />
+              </svg>
+            )}
+          </button>
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void handleFile(f);
+              e.target.value = '';
+            }}
+          />
           <textarea
             ref={composerRef}
             rows={1}
             value={draft}
             onChange={(e) => {
-              setDraft(e.target.value);
-              emitTyping(e.target.value.length > 0);
+              const v = e.target.value;
+              setDraft(v);
+              emitTyping(v.length > 0);
               const ta = e.target as HTMLTextAreaElement;
               ta.style.height = '0px';
               ta.style.height = Math.min(140, ta.scrollHeight) + 'px';
+              const caret = ta.selectionStart ?? v.length;
+              const before = v.slice(0, caret);
+              const m = before.match(/@([a-z0-9_]*)$/i);
+              setMentionQuery(m ? m[1] : null);
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -293,6 +404,8 @@ export default function Conversation() {
                 setReplyTo(null);
                 setEditingId(null);
                 setDraft('');
+                setAttachUrl(null);
+                setMentionQuery(null);
               }
             }}
             placeholder={editingId ? 'Edit message…' : 'Message…'}
@@ -300,11 +413,11 @@ export default function Conversation() {
           />
           <motion.button
             whileTap={{ scale: 0.9 }}
-            disabled={!draft.trim()}
+            disabled={!draft.trim() && !attachUrl}
             onClick={send}
             className={clsx(
               'flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-white shadow-glow transition',
-              draft.trim()
+              draft.trim() || attachUrl
                 ? 'bg-gradient-to-br from-accent to-accent-glow'
                 : 'cursor-not-allowed bg-white/10',
             )}
@@ -344,12 +457,26 @@ interface BubbleProps {
   message: Message;
   prevAuthor?: string;
   isOwn: boolean;
-  members: Array<{ id: string; displayName: string; avatarColor: string }>;
+  members: ChatMember[];
   allMessages: Message[];
   onReply: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onPin: () => void;
   onReact: (emoji: string) => void;
+}
+
+function renderBody(body: string): React.ReactNode {
+  const parts = body.split(/(@[a-z0-9_]{2,24})/gi);
+  return parts.map((p, i) =>
+    /^@[a-z0-9_]{2,24}$/i.test(p) ? (
+      <span key={i} className="text-accent-light font-medium">
+        {p}
+      </span>
+    ) : (
+      <span key={i}>{p}</span>
+    ),
+  );
 }
 
 function MessageBubble({
@@ -361,6 +488,7 @@ function MessageBubble({
   onReply,
   onEdit,
   onDelete,
+  onPin,
   onReact,
 }: BubbleProps) {
   const showAuthor = !isOwn && prevAuthor !== message.authorId;
@@ -412,7 +540,11 @@ function MessageBubble({
       {!isOwn && (
         <div className="w-8">
           {showAuthor && author && (
-            <Avatar name={author.displayName} color={author.avatarColor} size={28} />
+            <UserAvatar
+              user={author}
+              size={28}
+              onClick={() => useStore.getState().showProfileView(author.id)}
+            />
           )}
         </div>
       )}
@@ -444,7 +576,25 @@ function MessageBubble({
               <div className="truncate text-white/65">{replyTo.body}</div>
             </div>
           )}
-          <div className="whitespace-pre-wrap break-words">{message.body}</div>
+          {message.imageUrl && (
+            <img
+              src={message.imageUrl}
+              alt=""
+              className="mb-1 rounded-xl max-w-full max-h-72 object-cover"
+            />
+          )}
+          {message.body && (
+            <div className="whitespace-pre-wrap break-words">{renderBody(message.body)}</div>
+          )}
+          {message.pinned && (
+            <div className="mt-1 inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-white/55">
+              <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="17" x2="12" y2="22" />
+                <path d="M5 17h14l-2-8h-2V5h-6v4H7l-2 8z" />
+              </svg>
+              pinned
+            </div>
+          )}
           <div
             className={clsx(
               'mt-1 flex items-center justify-end gap-1 text-[10px]',
@@ -504,6 +654,12 @@ function MessageBubble({
                   <line x1="15" y1="9" x2="15.01" y2="9" />
                 </svg>
               </ActionBtn>
+              <ActionBtn onClick={onPin} title={message.pinned ? 'Unpin' : 'Pin'}>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="17" x2="12" y2="22" />
+                  <path d="M5 17h14l-2-8h-2V5h-6v4H7l-2 8z" />
+                </svg>
+              </ActionBtn>
               {isOwn && (
                 <>
                   <ActionBtn onClick={onEdit} title="Edit">
@@ -553,6 +709,43 @@ function MessageBubble({
         </AnimatePresence>
       </div>
     </motion.div>
+  );
+}
+
+function MentionDropdown({
+  members,
+  query,
+  onPick,
+}: {
+  members: ChatMember[];
+  query: string;
+  onPick: (m: ChatMember) => void;
+}) {
+  const q = query.toLowerCase();
+  const filtered = members
+    .filter(
+      (m) =>
+        m.username.toLowerCase().includes(q) || m.displayName.toLowerCase().includes(q),
+    )
+    .slice(0, 5);
+  if (filtered.length === 0) return null;
+  return (
+    <div className="glass rounded-2xl p-1 mb-2 space-y-0.5">
+      {filtered.map((m) => (
+        <button
+          key={m.id}
+          type="button"
+          onClick={() => onPick(m)}
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-xl text-left hover:bg-white/10"
+        >
+          <UserAvatar user={m} size={28} />
+          <div className="text-sm">
+            <span className="font-medium">{m.displayName}</span>{' '}
+            <span className="text-[11px] text-white/50">@{m.username}</span>
+          </div>
+        </button>
+      ))}
+    </div>
   );
 }
 

@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import { z } from 'zod';
 import { db, type ChatRow, type MessageRow, type ReactionRow, type UserRow } from '../db.js';
 import { requireAuth } from '../auth.js';
+import { serializeUser } from './auth.js';
 
 export const chatsRouter = Router();
 
@@ -22,7 +23,8 @@ interface ChatListItem {
   } | null;
   lastMessageAt: number;
   unread: number;
-  members: Array<{ id: string; username: string; displayName: string; avatarColor: string; lastSeen: number }>;
+  members: Array<ReturnType<typeof serializeUser>>;
+  pinnedMessage: { id: string; body: string; authorName: string } | null;
 }
 
 function loadChatMembers(chatId: string): UserRow[] {
@@ -62,6 +64,14 @@ function chatToListItem(chat: ChatRow, viewerId: string): ChatListItem {
     avatarColor = other?.avatar_color ?? '';
   }
 
+  const pinned = db
+    .prepare<[string], MessageRow>(
+      `SELECT * FROM messages WHERE chat_id = ? AND pinned = 1 AND deleted_at IS NULL
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(chat.id);
+  const pinnedAuthor = pinned ? members.find((m) => m.id === pinned.author_id) : undefined;
+
   return {
     id: chat.id,
     type: chat.type,
@@ -78,13 +88,14 @@ function chatToListItem(chat: ChatRow, viewerId: string): ChatListItem {
       : null,
     lastMessageAt: chat.last_message_at,
     unread,
-    members: members.map((m) => ({
-      id: m.id,
-      username: m.username,
-      displayName: m.display_name,
-      avatarColor: m.avatar_color,
-      lastSeen: m.last_seen,
-    })),
+    members: members.map(serializeUser),
+    pinnedMessage: pinned
+      ? {
+          id: pinned.id,
+          body: pinned.body,
+          authorName: pinnedAuthor?.display_name ?? '',
+        }
+      : null,
   };
 }
 
@@ -223,7 +234,9 @@ chatsRouter.get('/:chatId/messages', (req, res) => {
         chatId: r.chat_id,
         authorId: r.author_id,
         body: r.body,
+        imageUrl: r.image_url,
         replyTo: r.reply_to,
+        pinned: !!r.pinned,
         editedAt: r.edited_at,
         deletedAt: r.deleted_at,
         createdAt: r.created_at,

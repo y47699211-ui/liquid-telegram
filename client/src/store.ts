@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ChatPreview, Message, User } from './types';
+import type { AppNotification, ChatPreview, Message, Post, StoryGroup, User } from './types';
 
 interface TypingEntry {
   userId: string;
@@ -40,6 +40,30 @@ interface State {
   typingByChat: Record<string, TypingEntry[]>;
   setTyping: (chatId: string, userId: string, displayName: string, typing: boolean) => void;
   pruneTyping: () => void;
+
+  // Posts
+  feedPosts: Post[];
+  setFeedPosts: (posts: Post[]) => void;
+  upsertPost: (post: Post) => void;
+  removePost: (id: string) => void;
+
+  // Stories
+  storyGroups: StoryGroup[];
+  setStoryGroups: (groups: StoryGroup[]) => void;
+
+  // Notifications
+  notifications: AppNotification[];
+  unreadNotifications: number;
+  setNotifications: (n: AppNotification[], unread: number) => void;
+  pushNotification: (n: AppNotification) => void;
+  clearUnreadNotifications: () => void;
+
+  // UI panels
+  profileViewUserId: string | null;
+  showProfileView: (id: string | null) => void;
+
+  view: 'chats' | 'feed' | 'notifications';
+  setView: (v: 'chats' | 'feed' | 'notifications') => void;
 
   // Theme
   theme: 'dark' | 'light';
@@ -181,6 +205,44 @@ export const useStore = create<State>((set, get) => ({
       }
       return { typingByChat: next };
     }),
+
+  feedPosts: [],
+  setFeedPosts: (posts) => set({ feedPosts: posts }),
+  upsertPost: (post) =>
+    set((state) => {
+      const idx = state.feedPosts.findIndex((p) => p.id === post.id);
+      if (idx >= 0) {
+        const copy = [...state.feedPosts];
+        copy[idx] = post;
+        return { feedPosts: copy };
+      }
+      return { feedPosts: [post, ...state.feedPosts] };
+    }),
+  removePost: (id) =>
+    set((state) => ({ feedPosts: state.feedPosts.filter((p) => p.id !== id) })),
+
+  storyGroups: [],
+  setStoryGroups: (groups) => set({ storyGroups: groups }),
+
+  notifications: [],
+  unreadNotifications: 0,
+  setNotifications: (n, unread) => set({ notifications: n, unreadNotifications: unread }),
+  pushNotification: (n) =>
+    set((state) => ({
+      notifications: [n, ...state.notifications].slice(0, 100),
+      unreadNotifications: state.unreadNotifications + (n.read ? 0 : 1),
+    })),
+  clearUnreadNotifications: () =>
+    set((state) => ({
+      notifications: state.notifications.map((n) => ({ ...n, read: true })),
+      unreadNotifications: 0,
+    })),
+
+  profileViewUserId: null,
+  showProfileView: (id) => set({ profileViewUserId: id }),
+
+  view: 'chats',
+  setView: (view) => set({ view }),
 
   theme: savedTheme,
   setTheme: (theme) => {
