@@ -109,6 +109,19 @@ export const useStore = create<State>((set, get) => ({
     set((state) => {
       const existing = state.messagesByChat[chatId] ?? [];
       if (existing.some((m) => m.id === message.id)) return {};
+      // If a pending temp message matches (same author, same body, within 60s), replace it
+      const tempIdx = existing.findIndex(
+        (m) =>
+          m.pending &&
+          m.authorId === message.authorId &&
+          m.body === message.body &&
+          Math.abs(m.createdAt - message.createdAt) < 60_000,
+      );
+      if (tempIdx >= 0) {
+        const copy = [...existing];
+        copy[tempIdx] = { ...message, pending: false };
+        return { messagesByChat: { ...state.messagesByChat, [chatId]: copy } };
+      }
       return {
         messagesByChat: { ...state.messagesByChat, [chatId]: [...existing, message] },
       };
